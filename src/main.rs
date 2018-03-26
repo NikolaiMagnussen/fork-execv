@@ -45,6 +45,6 @@ fn main() {
         println!("Going to sleep..");
         let ten_seconds = time::Duration::new(20, 0);
         thread::sleep(ten_seconds);
-        println!("Sleeping done - exiting now! :)");
+        println!("Sleeping done - exiting now! :-)");
     }
 }
