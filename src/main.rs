@@ -74,7 +74,7 @@ impl Worm {
         let binary_name = env::current_exe().expect("Unable to get the current executable");
         let mut f = File::open(binary_name).expect("Error opening file");
 
-        let n = f.read_to_end(&mut buf).expect("Could not read file to end");
+        let _n = f.read_to_end(&mut buf).expect("Could not read file to end");
 
         let res = client.post(&format!("http://{}:8000/worm_entrance", host))
             .body(buf)
@@ -101,15 +101,30 @@ impl Worm {
         println!("Sent data to host and got response: {:?}", res);
     }
 
+    pub fn send_to_host(&self, host: &str) {
+        self.send_prog_to_host(host);
+        self.send_data_to_host(host);
+    }
+
     pub fn send_to_random_host(&self) {
         for host in self.hosts_to_ovserve.iter() {
             if self.observation_data.contains_key(host) == false {
-                self.send_prog_to_host(&host);
-                self.send_data_to_host(&host);
-
+                self.send_to_host(&host);
                 return
             }
         }
+    }
+
+    pub fn return_data(&self) {
+        let client = reqwest::Client::new();
+        let res = client.post("http://localhost:8000/observation_data")
+            .json(&self.observation_data)
+            .send().expect("Error uploading data");
+        println!("Uploaded data to wormgate: {:?}", res);
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.hosts_to_ovserve.iter().all(|ref host| self.observation_data.contains_key(host.as_str()))
     }
 }
 
@@ -160,35 +175,6 @@ fn get_send_port(hostname: &[u8]) -> u64 {
     (hasher.finish() & 0xffff) | 1024
 }
 
-fn get_data_from_self() -> String {
-    let map: HashMap<String, String> = reqwest::get("http://localhost:8000/observation_data")
-        .expect("Error requesting observation data")
-        .json().expect("Error parsing json");
-
-    /* Return the value of the first key */
-    let name = map.keys().next().expect("No keys are present..");
-    String::from(map[name].as_str())
-}
-
-fn spread() {
-    let client = reqwest::Client::new();
-    let binary_name = env::current_exe().expect("Unable to get the current executable");
-    println!("Binary name: {:?}", binary_name);
-
-    let mut f = File::open(binary_name).expect("Error opening file");
-    let mut buf = Vec::with_capacity(100);
-
-    let n = f.read_to_end(&mut buf).expect("Could not read file to end");
-    println!("Number of bytes read: {}", n);
-
-    let res = client.post("http://localhost:8000/worm_entrance")
-        .body(buf)
-        .send().expect("Error sending message");
-    println!("Post result: {:?}", res);
-}
-
-
-
 fn listen_for_worm() -> Result<Worm, &'static str> {
         let mut buf = vec![0; 50];
         let hostname = gethostname(&mut buf).expect("Error getting hostname")
@@ -230,10 +216,27 @@ fn main() {
         let mut worm = listen_for_worm().expect("Unable to create worm");
         println!("Worm is: {:?}", worm);
 
+        /* Get data from wormgate */
         worm.get_data();
 
-        if worm.should_infect() {
+        /* Have we retrieved all data items */
+        if worm.is_finished() {
+            println!("Finished gathering all data items");
+            if worm.current_hostname == worm.initial_hostname {
+                println!("Finally back home - should return data");
+                worm.return_data();
+                println!("Returned data - will die sooner or later");
+            } else {
+                println!("Need to relocate to initial host");
+                worm.send_to_host(&worm.initial_hostname);
+            }
+        /* If we should infect another host, do it */
+        } else if worm.should_infect() {
+            println!("Infecting another random host");
             worm.send_to_random_host();
+        /* What should we do now? */
+        } else {
+            println!("I don't know what to do anymore");
         }
 
         // Final shit - sleep to make sure we can see the command
