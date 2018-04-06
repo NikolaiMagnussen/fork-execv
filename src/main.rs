@@ -1,8 +1,10 @@
 extern crate nix;
 
-use nix::unistd::{execv, setsid, fork, ForkResult};
+use nix::unistd::{execv, setsid, fork, gethostname, ForkResult};
 use std::{thread, time};
+use std::collections::hash_map::DefaultHasher;
 use std::ffi::CString;
+use std::hash::Hasher;
 use std::env;
 
 fn daemonize() {
@@ -16,7 +18,7 @@ fn daemonize() {
         Ok(ForkResult::Child) => {
             println!("I am the child process!");
             if let Ok(pid) = setsid() {
-                println!("Pid: {}", pid);
+                println!("Setsid gave pid {}", pid);
             } else {
                 println!("Setsid failed :(");
             }
@@ -37,10 +39,30 @@ fn is_daemonized() -> bool {
     env::args().len() > 1
 }
 
+fn get_listen_port() -> u64 {
+    let mut buf = vec![0; 50];
+    let hostname = gethostname(&mut buf).expect("Error getting hostname");
+    get_send_port(hostname.to_bytes())
+}
+
+fn get_send_port(hostname: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::default();
+
+    hasher.write(hostname);
+
+    /* Make sure port is 16 bit and greater or equal than 1024 */
+    (hasher.finish() & 0xffff) | 1024
+}
+
 fn main() {
     if is_daemonized() {
-        println!("This is now daemonized");
-        println!("{:?}", env::args());
+        println!("This is now daemonized and was started with args: {:?}", env::args());
+
+        // Get port for listening
+        let port = get_listen_port();
+        println!("Port number: {}", port);
+
+        // Final shit - sleep to make sure we can see the command
         println!("Going to sleep for 20 seconds..");
         let twenty_seconds = time::Duration::new(20, 0);
         thread::sleep(twenty_seconds);
