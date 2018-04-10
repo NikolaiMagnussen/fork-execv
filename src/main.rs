@@ -19,7 +19,7 @@ use std::vec::Vec;
 use std::hash::Hasher;
 use std::env;
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone)]
 enum TreeState {
     Child,
     Parent,
@@ -45,11 +45,34 @@ struct Worm {
 }
 
 impl WormSegment {
+    /// Create a new WormSegment based on a state and host
     pub fn new(rel: TreeState, host: &str) -> WormSegment {
         WormSegment {
             relationship: rel,
             hostname: String::from(host)
         }
+    }
+
+    /// Convert WormSegment such that we can send it to another segment
+    pub fn send_to(&self, target: &WormSegment) -> WormSegment {
+        let new_rel = match target.relationship {
+            TreeState::Child => {
+                match self.relationship {
+                    TreeState::Child => TreeState::Sibling,
+                    TreeState::This => TreeState::Parent,
+                    _ => self.relationship
+                }
+            },
+            TreeState::Sibling => {
+                match self.relationship {
+                    TreeState::This => TreeState::Sibling,
+                    _ => self.relationship
+                }
+            },
+            _ => self.relationship
+        };
+
+        WormSegment::new(new_rel, &self.hostname)
     }
 }
 
