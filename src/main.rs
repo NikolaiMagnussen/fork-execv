@@ -54,7 +54,10 @@ impl WormSegment {
 }
 
 impl Worm {
-    // Should only be called upon initial Worm creation
+    /// Create a new worm with max number of segments and a list of hosts
+    ///
+    /// Should only be used the very first time a worm is created,
+    /// and the rest should simply be sent.
     pub fn new(max_segments: usize, hosts: Vec<String>) -> Worm {
         let mut buf = vec![0; 50];
         let hostname = gethostname(&mut buf).expect("Error getting hostname")
@@ -71,35 +74,40 @@ impl Worm {
         }
     }
 
+    /// Get data from wormgate on current host
     pub fn get_data(&mut self) {
         let map: HashMap<String, String> = reqwest::get("http://localhost:8000/observation_data")
             .expect("Error requesting observation data")
             .json().expect("Error parsing JSON");
 
-        for (k, v) in map.iter() {
+        for (k, v) in &map {
             // Strip away port number from data
             self.observation_data.insert(k[..k.len()-5].to_string(), v.to_string());
         }
     }
 
+    /// Determine if the worm should infect a new host
     pub fn should_infect(&self) -> bool {
         self.cur_num_segments < self.max_num_segments
     }
 
+    /// Send the program spawning the client to wormgate to infect next host
     fn send_prog_to_host(&self, host: &str) {
         let client = reqwest::Client::new();
         let mut buf = Vec::with_capacity(100);
         let binary_name = env::current_exe().expect("Unable to get the current executable");
         let mut f = File::open(binary_name).expect("Error opening file");
 
+        // Read binary file into buffer and post it to wormgate
         let _n = f.read_to_end(&mut buf).expect("Could not read file to end");
-
         let res = client.post(&format!("http://{}:8000/worm_entrance", host))
             .body(buf)
             .send().expect("Error sending message");
+
         println!("Post result: {:?}", res);
     }
 
+    /// Calculate the port of a specific hostname
     fn calculate_port(&self, hostname: &[u8]) -> u64 {
         let mut hasher = DefaultHasher::default();
 
@@ -109,11 +117,12 @@ impl Worm {
         (hasher.finish() & 0xffff) | 1024
     }
 
+    /// Send the Worm state to a listening worm segment
     fn send_data_to_host(&mut self, host: &str) {
         let _client = reqwest::Client::new();
         let port = self.calculate_port(host.as_bytes());
 
-        // Update Worm state
+        // Update Worm state before sending it
         self.cur_num_segments += 1;
 
         println!("Sending data to: {}:{}", host, port);
@@ -121,16 +130,18 @@ impl Worm {
         let _res = serde_json::to_writer(stream, &self);
     }
 
+    /// Send the program and Worm state to the specified host
     pub fn send_to_host(&mut self, host: &str) {
         self.send_prog_to_host(host);
         self.send_data_to_host(host);
     }
 
+    /// Send program and Worm state to a random host which we don't have data from
     pub fn send_to_random_host(&mut self) {
         let mut send_host = None;
-        for host in self.hosts_to_ovserve.iter() {
+        for host in &self.hosts_to_ovserve {
             println!("Checking if {:?} has been infected", host);
-            if self.observation_data.contains_key(host) == false {
+            if !self.observation_data.contains_key(host) {
                 println!("{:?} has not been infected - lets go!", host);
                 send_host = Some(host.clone());
                 break;
@@ -143,6 +154,7 @@ impl Worm {
         }
     }
 
+    /// Return data to wormgate on current host
     pub fn return_data(&self) {
         let client = reqwest::Client::new();
         let res = client.post("http://localhost:8000/observation_data")
@@ -151,11 +163,13 @@ impl Worm {
         println!("Uploaded data to wormgate: {:?}", res);
     }
 
+    /// Determine if we have all data we should have before returning it
     pub fn is_finished(&self) -> bool {
         self.hosts_to_ovserve.iter().all(|ref host| self.observation_data.contains_key(host.as_str()))
     }
 }
 
+/// Daemonize current process
 fn daemonize() {
     let this = env::current_exe().expect("Unable to get the current executable");
     println!("This executable is: {:?}", this);
@@ -184,16 +198,19 @@ fn daemonize() {
     }
 }
 
+/// Number of arguments determine if the process is daemonized
 fn is_daemonized() -> bool {
     env::args().len() > 1
 }
 
+/// Determine which port to bind to on current host
 fn get_listen_port() -> u64 {
     let mut buf = vec![0; 50];
     let hostname = gethostname(&mut buf).expect("Error getting hostname");
     get_send_port(hostname.to_bytes())
 }
 
+/// Determine port to send data to at specified host name
 fn get_send_port(hostname: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::default();
 
