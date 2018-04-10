@@ -20,12 +20,6 @@ use std::vec::Vec;
 use std::hash::Hasher;
 use std::env;
 
-#[derive(Deserialize, Debug)]
-struct ObservationData {
-    #[serde(rename = "localhost:8000")]  // <-- this is a variant attribute
-    data: String
-}
-
 #[derive(Deserialize, Serialize, Debug)]
 struct Worm {
     initial_hostname: String,
@@ -42,7 +36,6 @@ impl Worm {
         let mut buf = vec![0; 50];
         let hostname = gethostname(&mut buf).expect("Error getting hostname")
             .to_str().expect("Error using hostname as str");
-
 
         Worm {
             initial_hostname: String::from(hostname),
@@ -102,9 +95,6 @@ impl Worm {
 
     pub fn send_to_host(&self, host: &str) {
         self.send_prog_to_host(host);
-        println!("Program is sent to new host: {:?}", host);
-        thread::sleep_ms(1000);
-        println!("Data will be sent to new host: {:?}", host);
         self.send_data_to_host(host);
     }
 
@@ -192,7 +182,10 @@ fn listen_for_worm() -> Result<Worm, &'static str> {
             println!("Got some data from {:?}", addr);
             /* Read shits from TCP stream */
             if let Ok(worm) = serde_json::from_reader(stream) {
+                let mut worm: Worm = worm;
                 println!("Deserialized worm data from stream");
+                worm.current_hostname = hostname.to_string();
+                worm.cur_num_segments += 1;
                 Ok(worm)
             /* No worm, but a start command */
             } else {
@@ -224,9 +217,6 @@ fn main() {
         let mut worm = listen_for_worm().expect("Unable to create worm");
         println!("Worm is: {:?}", worm);
 
-        /* Get data from wormgate */
-        worm.get_data();
-
         /* Have we retrieved all data items */
         if worm.is_finished() {
             println!("Finished gathering all data items");
@@ -238,20 +228,17 @@ fn main() {
                 println!("Need to relocate to initial host");
                 worm.send_to_host(&worm.initial_hostname);
             }
-        /* If we should infect another host, do it */
-        } else if worm.should_infect() {
-            println!("Infecting another random host");
-            worm.send_to_random_host();
-        /* What should we do now? */
         } else {
-            println!("I don't know what to do anymore");
+            /* Get data from wormgate */
+            worm.get_data();
+            /* If we should infect another host, do it */
+            if worm.should_infect() {
+                println!("Infecting another random host");
+                worm.send_to_random_host();
+            } else {
+                println!("I don't know what to do anymore - I'll just die..");
+            }
         }
-
-        // Final shit - sleep to make sure we can see the command
-        println!("Going to sleep..");
-        let sleep_time = time::Duration::new(5, 0);
-        thread::sleep(sleep_time);
-        println!("Sleeping done - exiting now! :-)");
     } else {
         daemonize();
     }
