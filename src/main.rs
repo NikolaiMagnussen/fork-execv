@@ -12,7 +12,6 @@ use nix::unistd::{execv, setsid, fork, gethostname, ForkResult};
 use std::io::{BufReader, BufRead, Read};
 use std::fs::File;
 use std::net::{TcpListener, TcpStream};
-use std::{thread, time};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -21,13 +20,37 @@ use std::hash::Hasher;
 use std::env;
 
 #[derive(Deserialize, Serialize, Debug)]
+enum TreeState {
+    Child,
+    Parent,
+    Sibling,
+    This
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct WormSegment {
+    relationship: TreeState,
+    hostname: String
+}
+
+#[derive(Deserialize, Serialize, Debug)]
 struct Worm {
     initial_hostname: String,
     current_hostname: String,
     max_num_segments: usize,
     cur_num_segments: usize,
     observation_data: HashMap<String, String>,
+    current_segments: Vec<WormSegment>,
     hosts_to_ovserve: Vec<String>
+}
+
+impl WormSegment {
+    pub fn new(rel: TreeState, host: &str) -> WormSegment {
+        WormSegment {
+            relationship: rel,
+            hostname: String::from(host)
+        }
+    }
 }
 
 impl Worm {
@@ -43,6 +66,7 @@ impl Worm {
             max_num_segments: max_segments,
             cur_num_segments: 1,
             observation_data: HashMap::new(),
+            current_segments: vec!(WormSegment::new(TreeState::This, hostname)),
             hosts_to_ovserve: hosts
         }
     }
@@ -53,6 +77,7 @@ impl Worm {
             .json().expect("Error parsing JSON");
 
         for (k, v) in map.iter() {
+            // Strip away port number from data
             self.observation_data.insert(k[..k.len()-5].to_string(), v.to_string());
         }
     }
@@ -84,28 +109,37 @@ impl Worm {
         (hasher.finish() & 0xffff) | 1024
     }
 
-    fn send_data_to_host(&self, host: &str) {
-        let client = reqwest::Client::new();
+    fn send_data_to_host(&mut self, host: &str) {
+        let _client = reqwest::Client::new();
         let port = self.calculate_port(host.as_bytes());
+
+        // Update Worm state
+        self.cur_num_segments += 1;
 
         println!("Sending data to: {}:{}", host, port);
         let stream = TcpStream::connect(&format!("{}:{}", host, port)).expect("Could not bind to socket");
-        let res = serde_json::to_writer(stream, &self);
+        let _res = serde_json::to_writer(stream, &self);
     }
 
-    pub fn send_to_host(&self, host: &str) {
+    pub fn send_to_host(&mut self, host: &str) {
         self.send_prog_to_host(host);
         self.send_data_to_host(host);
     }
 
-    pub fn send_to_random_host(&self) {
+    pub fn send_to_random_host(&mut self) {
+        let mut send_host = None;
         for host in self.hosts_to_ovserve.iter() {
             println!("Checking if {:?} has been infected", host);
             if self.observation_data.contains_key(host) == false {
                 println!("{:?} has not been infected - lets go!", host);
-                self.send_to_host(&host);
-                return
+                send_host = Some(host.clone());
+                break;
             }
+        }
+        if let Some(host) = send_host {
+            self.send_to_host(&host);
+        } else {
+            println!("Could not find a free host");
         }
     }
 
@@ -226,7 +260,8 @@ fn main() {
                 println!("Returned data - will die sooner or later");
             } else {
                 println!("Need to relocate to initial host");
-                worm.send_to_host(&worm.initial_hostname);
+                let host = worm.initial_hostname.clone();
+                worm.send_to_host(&host);
             }
         } else {
             /* Get data from wormgate */
