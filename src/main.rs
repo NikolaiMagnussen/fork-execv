@@ -9,7 +9,7 @@ extern crate serde_json;
 
 use nix::unistd::{execv, setsid, fork, gethostname, ForkResult};
 
-use std::io::{BufReader, BufRead, Read};
+use std::io::{self, BufReader, BufRead, Read};
 use std::fs::File;
 use std::net::{TcpListener, TcpStream};
 use std::collections::hash_map::DefaultHasher;
@@ -17,9 +17,10 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::vec::Vec;
 use std::hash::Hasher;
+use std::time::{Instant, Duration};
 use std::env;
 
-#[derive(Deserialize, Serialize, Debug, Copy, Clone)]
+#[derive(Deserialize, Serialize, Debug, Copy, Clone, PartialEq)]
 enum TreeState {
     Child,
     Parent,
@@ -28,6 +29,13 @@ enum TreeState {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
+enum Message {
+    SuicideNote(WormSegment),
+    NewSegment(WormSegment),
+    WantData(String),
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
 struct WormSegment {
     relationship: TreeState,
     hostname: String
@@ -116,6 +124,66 @@ impl Worm {
     /// Determine if the worm should infect a new host
     pub fn should_infect(&self) -> bool {
         self.cur_num_segments < self.max_num_segments
+    }
+
+    /// Listen for gossip from other WormSegments
+    /// Insert data into the state struct
+    pub fn listen_for_gossip(&mut self) {
+        // Set timeout to 60 seconds
+        let timeout = Duration::from_secs(60);
+        let now = Instant::now();
+        let listener = TcpListener::bind(format!("{}:{}", &self.current_hostname , get_listen_port())).expect("Error binding to port");
+        listener.set_nonblocking(true).expect("Unable to make listener nonblocking");
+        for conn in listener.incoming() {
+            match conn {
+                Ok(stream) => {
+                    // Accept connections and perform actions based on the message type received
+                    // Can either receive a message about a new segment or someone wants data from
+                    // the specific host
+                    if let Ok(message) = serde_json::from_reader(&stream) {
+                        let message: Message = message;
+                        match message {
+                            Message::NewSegment(segment) => {
+                                if !self.current_segments.contains(&segment) {
+                                    self.current_segments.push(segment);
+                                }
+                            },
+                            Message::WantData(hostname) => {
+                                let _res = serde_json::to_writer(&stream, &self.observation_data.get(&hostname));
+                            },
+                            Message::SuicideNote(segment) => {
+                                if let Some(index) = &self.current_segments.position(segment) {
+                                    self.current_segments.remove(index);
+                                    self.cur_num_segments -= 1;
+                                }
+                            }
+                        }
+
+                    }
+                },
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if now.elapsed() > timeout {
+                        break;
+                    }
+                },
+                Err(e) => {
+                    println!("Unable to accept connection: {:?}", e);
+                }
+            }
+        }
+    }
+
+    /// Send suicide note
+    pub fn send_suicide_note(&self) {
+        for host in &self.current_segments.take(3) {
+            if host.relationship == TreeState::This {
+                continue;
+            }
+
+            let timeout = Duration::from_secs(1);
+            let stream = TcpStream::connect_timeout(&format!("{}:{}", &host.hostname, self.calculate_port(&host.hostname.as_bytes())), timeout).expect("Could not connect to host {:?}", &host);
+            let _res = serde_json::to_writer(&stream, Message::SuicideNote);
+        }
     }
 
     /// Send the program spawning the client to wormgate to infect next host
@@ -322,10 +390,14 @@ fn main() {
             while worm.should_infect() {
                 println!("Infecting another random host");
                 worm.send_to_random_host();
+                println!("Listening for gossip from other hosts");
+                worm.listen_for_gossip();
             }
-            println!("Should not infect - I'll just die");
+
+            println!("Should not infect - I'll just die and send a message about it");
+            worm.send_suicide_note();
         }
-    // Stealth is great
+    // Stealth is great so let's daemonize and stuff
     } else {
         daemonize();
     }
