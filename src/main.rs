@@ -36,11 +36,11 @@ struct WormSegment {
 #[derive(Deserialize, Serialize, Debug)]
 struct Worm {
     initial_hostname: String,
-    current_hostname: String,
+    current_hostname: String, // Modify after sending
     max_num_segments: usize,
-    cur_num_segments: usize,
-    observation_data: HashMap<String, String>,
-    current_segments: Vec<WormSegment>,
+    cur_num_segments: usize, // Modify before sending
+    observation_data: HashMap<String, String>, // Modify with gossiping and after getting data
+    current_segments: Vec<WormSegment>, // Modify before sending and after sending (change state)
     hosts_to_ovserve: Vec<String>
 }
 
@@ -72,7 +72,11 @@ impl WormSegment {
             _ => self.relationship
         };
 
-        WormSegment::new(new_rel, &self.hostname)
+        if target.hostname == self.hostname {
+            WormSegment::new(TreeState::This, &self.hostname)
+        } else {
+            WormSegment::new(new_rel, &self.hostname)
+        }
     }
 }
 
@@ -147,6 +151,7 @@ impl Worm {
 
         // Update Worm state before sending it
         self.cur_num_segments += 1;
+        self.current_segments.push(WormSegment::new(TreeState::Child, host));
 
         println!("Sending data to: {}:{}", host, port);
         let stream = TcpStream::connect(&format!("{}:{}", host, port)).expect("Could not bind to socket");
@@ -244,6 +249,7 @@ fn get_send_port(hostname: &[u8]) -> u64 {
 }
 
 /// Listen for either the initial connection or a worm from parent segment
+/// Update worm segment status after receiving it from parent
 fn listen_for_worm() -> Result<Worm, &'static str> {
         let mut buf = vec![0; 50];
         let hostname = gethostname(&mut buf).expect("Error getting hostname")
@@ -259,8 +265,11 @@ fn listen_for_worm() -> Result<Worm, &'static str> {
             if let Ok(worm) = serde_json::from_reader(stream) {
                 let mut worm: Worm = worm;
                 println!("Deserialized worm data from stream");
+
+                // Update worm segment data by calling the method for converting segment status
                 worm.current_hostname = hostname.to_string();
-                worm.cur_num_segments += 1;
+                worm.current_segments = worm.current_segments.map(|segment| segment.send_to(WormSegment::new(TreeState::Child, hostname)));
+
                 Ok(worm)
             /* No worm, but a start command */
             } else {
