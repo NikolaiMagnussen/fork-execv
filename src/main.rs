@@ -268,7 +268,9 @@ fn listen_for_worm() -> Result<Worm, &'static str> {
 
                 // Update worm segment data by calling the method for converting segment status
                 worm.current_hostname = hostname.to_string();
-                worm.current_segments = worm.current_segments.map(|segment| segment.send_to(WormSegment::new(TreeState::Child, hostname)));
+                worm.current_segments = worm.current_segments.iter()
+                    .map(|segment| segment.send_to(&WormSegment::new(TreeState::Child, hostname)))
+                    .collect();
 
                 Ok(worm)
             /* No worm, but a start command */
