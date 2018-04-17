@@ -1,5 +1,6 @@
 extern crate nix;
 extern crate reqwest;
+extern crate rand;
 
 #[macro_use]
 extern crate serde_derive;
@@ -152,7 +153,7 @@ impl Worm {
                                 let _res = serde_json::to_writer(&stream, &self.observation_data.get(&hostname));
                             },
                             Message::SuicideNote(segment) => {
-                                if let Some(index) = &self.current_segments.position(segment) {
+                                if let Some(index) = self.current_segments.iter().position(|s| s == &segment) {
                                     self.current_segments.remove(index);
                                     self.cur_num_segments -= 1;
                                 }
@@ -175,14 +176,14 @@ impl Worm {
 
     /// Send suicide note
     pub fn send_suicide_note(&self) {
-        for host in &self.current_segments.take(3) {
+        for host in self.current_segments.iter().take(3) {
             if host.relationship == TreeState::This {
                 continue;
             }
 
             let timeout = Duration::from_secs(1);
-            let stream = TcpStream::connect_timeout(&format!("{}:{}", &host.hostname, self.calculate_port(&host.hostname.as_bytes())), timeout).expect("Could not connect to host {:?}", &host);
-            let _res = serde_json::to_writer(&stream, Message::SuicideNote);
+            let stream = TcpStream::connect_timeout(&format!("{}:{}", host.hostname, self.calculate_port(&host.hostname.as_bytes())).parse().expect("Error parsing socket address"), timeout).expect("Could not connect to host");
+            let _res = serde_json::to_writer(&stream, &Message::SuicideNote(WormSegment::new(TreeState::This, &self.current_hostname)));
         }
     }
 
@@ -245,6 +246,14 @@ impl Worm {
         }
         if let Some(host) = send_host {
             self.send_to_host(&host);
+
+            // Gossip about it to some other host - with a timeout
+            for gossip_host in self.current_segments.iter().take(3) {
+                let msg = Message::NewSegment(WormSegment::new(TreeState::Child, &host));
+                let timeout = Duration::from_secs(1);
+                let stream = TcpStream::connect_timeout(&format!("{}:{}", &gossip_host.hostname, self.calculate_port(gossip_host.hostname.as_bytes())).parse().expect("Error parsing address"), timeout).expect("Unable to connect to host");
+                let _res = serde_json::to_writer(&stream, &msg);
+            }
         } else {
             println!("Could not find a free host");
         }
@@ -388,10 +397,19 @@ fn main() {
             worm.get_data();
             /* If we should infect another host, do it */
             while worm.should_infect() {
-                println!("Infecting another random host");
-                worm.send_to_random_host();
-                println!("Listening for gossip from other hosts");
-                worm.listen_for_gossip();
+                match rand::random::<u8>() % 2 {
+                    0 => {
+                        println!("Infecting another random host and gossiping about it");
+                        worm.send_to_random_host();
+                    },
+                    1 => {
+                        println!("Listening for gossip from other hosts");
+                        worm.listen_for_gossip();
+                    },
+                    _ => {
+                        println!("A random number modulo 2 should never be anything but 0 or 1");
+                    },
+                }
             }
 
             println!("Should not infect - I'll just die and send a message about it");
