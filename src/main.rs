@@ -131,7 +131,7 @@ impl Worm {
     /// Insert data into the state struct
     pub fn listen_for_gossip(&mut self) {
         // Set timeout to 60 seconds
-        let timeout = Duration::from_secs(60);
+        let timeout = Duration::from_secs(5);
         let now = Instant::now();
         let listener =
             TcpListener::bind(format!("{}:{}", &self.current_hostname, get_listen_port()))
