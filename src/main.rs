@@ -51,6 +51,7 @@ struct Worm {
     observation_data: HashMap<String, String>, // Modify with gossiping and after getting data
     current_segments: Vec<WormSegment>, // Modify before sending and after sending (change state)
     hosts_to_ovserve: Vec<String>,
+    wormgate_port: u16,
 }
 
 impl WormSegment {
@@ -90,7 +91,7 @@ impl Worm {
     ///
     /// Should only be used the very first time a worm is created,
     /// and the rest should simply be sent.
-    pub fn new(max_segments: usize, hosts: Vec<String>) -> Worm {
+    pub fn new(max_segments: usize, worm_port: u16, hosts: Vec<String>) -> Worm {
         let mut buf = vec![0; 50];
         let hostname = gethostname(&mut buf)
             .expect("Error getting hostname")
@@ -105,12 +106,13 @@ impl Worm {
             observation_data: HashMap::new(),
             current_segments: vec![WormSegment::new(TreeState::This, hostname)],
             hosts_to_ovserve: hosts,
+            wormgate_port: worm_port,
         }
     }
 
     /// Get data from wormgate on current host
     pub fn get_data(&mut self) {
-        let map: HashMap<String, String> = reqwest::get("http://localhost:8000/observation_data")
+        let map: HashMap<String, String> = reqwest::get(&format!("http://localhost:{}/observation_data", self.wormgate_port))
             .expect("Error requesting observation data")
             .json()
             .expect("Error parsing JSON");
@@ -218,7 +220,7 @@ impl Worm {
         // Read binary file into buffer and post it to wormgate
         let _n = f.read_to_end(&mut buf).expect("Could not read file to end");
         let res = client
-            .post(&format!("http://{}:8000/worm_entrance", host))
+            .post(&format!("http://{}:{}/worm_entrance", host, self.wormgate_port))
             .body(buf)
             .send()
             .expect("Error sending message");
@@ -296,7 +298,7 @@ impl Worm {
     pub fn return_data(&self) {
         let client = reqwest::Client::new();
         let res = client
-            .post("http://localhost:8000/observation_data")
+            .post(&format!("http://localhost:{}/observation_data", self.wormgate_port))
             .json(&self.observation_data)
             .send()
             .expect("Error uploading data");
@@ -400,6 +402,9 @@ fn listen_for_worm() -> Result<Worm, &'static str> {
             println!("Unable to deserialize worm data - must be initial segment");
             let file = File::open("hosts").expect("Unable to open hosts file");
             let mut reader = BufReader::new(file);
+            let mut worm_port = String::new();
+            let _nread = reader.read_line(&mut worm_port).expect("Unable to read port number");
+            let worm_port = worm_port.parse::<u16>().expect("Unable to parse port number");
 
             /* Parse hostnames and create worm */
             let mut hostnames: Vec<String> = vec![String::from(hostname)];
@@ -408,7 +413,7 @@ fn listen_for_worm() -> Result<Worm, &'static str> {
                     hostnames.push(line);
                 }
             }
-            Ok(Worm::new(hostnames.len(), hostnames))
+            Ok(Worm::new(hostnames.len(), worm_port, hostnames))
         }
     } else {
         Err("Could not read from TCP stream")
