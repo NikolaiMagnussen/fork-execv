@@ -9,11 +9,11 @@ extern crate serde;
 extern crate serde_json;
 
 use nix::unistd::{execv, fork, gethostname, setsid, ForkResult};
-use nix::sys::signal::{sigaction, Signal, SigAction, SigHandler, SaFlags, SigSet};
+use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 
 use std::io::{self, BufRead, BufReader, Read};
 use std::fs::File;
-use std::net::{TcpListener, TcpStream, ToSocketAddrs, Shutdown};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -144,9 +144,11 @@ impl Worm {
         // Set timeout to 5 seconds
         let timeout = Duration::from_secs(5);
         let now = Instant::now();
-        let listener =
-            TcpListener::bind(format!("{}:{}", &self.current_hostname, get_listen_port(false)))
-                .expect("Error binding to port when listening for gossip");
+        let listener = TcpListener::bind(format!(
+            "{}:{}",
+            &self.current_hostname,
+            get_listen_port(false)
+        )).expect("Error binding to port when listening for gossip");
         listener
             .set_nonblocking(true)
             .expect("Unable to make listener nonblocking");
@@ -168,8 +170,13 @@ impl Worm {
                                 }
                             }
                             Message::WantData(hostname) => {
-                                stream.shutdown(Shutdown::Read).expect("Read Shutdown failed");
-                                println!("Got message about someone that wanted data: {:?}", hostname);
+                                stream
+                                    .shutdown(Shutdown::Read)
+                                    .expect("Read Shutdown failed");
+                                println!(
+                                    "Got message about someone that wanted data: {:?}",
+                                    hostname
+                                );
                                 let _res = serde_json::to_writer(
                                     &stream,
                                     &self.observation_data.get(&hostname),
@@ -177,8 +184,9 @@ impl Worm {
                             }
                             Message::SuicideNote(segment) => {
                                 println!("Got a suicide note from {:?}", segment);
-                                if let Some(index) =
-                                    self.current_segments.iter().position(|s| &s.hostname == &segment.hostname)
+                                if let Some(index) = self.current_segments
+                                    .iter()
+                                    .position(|s| &s.hostname == &segment.hostname)
                                 {
                                     self.current_segments.remove(index);
                                     self.cur_num_segments -= 1;
@@ -187,7 +195,9 @@ impl Worm {
                             Message::GatheringCompleted => {
                                 println!("Got message that we are completed!");
                                 self.cur_num_segments = self.max_num_segments;
-                                println!("Setting current number of segments such that we should die");
+                                println!(
+                                    "Setting current number of segments such that we should die"
+                                );
                             }
                         }
                     } else {
@@ -216,8 +226,11 @@ impl Worm {
 
             let timeout = Duration::from_secs(1);
             let hostname = &host.hostname;
-            let mut addr = format!("{}:{}", hostname, self.calculate_port(hostname.as_bytes(), false))
-                .as_str()
+            let mut addr = format!(
+                "{}:{}",
+                hostname,
+                self.calculate_port(hostname.as_bytes(), false)
+            ).as_str()
                 .to_socket_addrs()
                 .expect("Unable to resolve hostname to IP");
             if let Ok(stream) = TcpStream::connect_timeout(
@@ -362,11 +375,17 @@ impl Worm {
             let msg = Message::GatheringCompleted;
             let timeout = Duration::from_secs(1);
             let hostname = &segment.hostname;
-            let mut addr = format!("{}:{}", hostname, self.calculate_port(hostname.as_bytes(), false))
-                .as_str()
+            let mut addr = format!(
+                "{}:{}",
+                hostname,
+                self.calculate_port(hostname.as_bytes(), false)
+            ).as_str()
                 .to_socket_addrs()
                 .expect("Unable to resolve hostname to IP");
-            if let Ok(stream) = TcpStream::connect_timeout(&addr.next().expect("No IP's matching the hostname"), timeout) {
+            if let Ok(stream) = TcpStream::connect_timeout(
+                &addr.next().expect("No IP's matching the hostname"),
+                timeout,
+            ) {
                 let _res = serde_json::to_writer(&stream, &msg);
             } else {
                 println!("Unable to reach segment: {:?}", segment);
@@ -392,8 +411,11 @@ impl Worm {
                 let msg = Message::WantData(segment.hostname.clone());
                 let timeout = Duration::from_secs(1);
                 let hostname = &segment.hostname;
-                let mut addr = format!("{}:{}", hostname, self.calculate_port(hostname.as_bytes(), false))
-                    .as_str()
+                let mut addr = format!(
+                    "{}:{}",
+                    hostname,
+                    self.calculate_port(hostname.as_bytes(), false)
+                ).as_str()
                     .to_socket_addrs()
                     .expect("Unable to resolve hostname to IP");
                 if let Ok(stream) = TcpStream::connect_timeout(
@@ -402,7 +424,9 @@ impl Worm {
                 ) {
                     println!("Connected..");
                     let _res = serde_json::to_writer(&stream, &msg);
-                    stream.shutdown(Shutdown::Write).expect("Write Shutdown failed");
+                    stream
+                        .shutdown(Shutdown::Write)
+                        .expect("Write Shutdown failed");
                     println!("Sent WantData..waiting for observation");
                     if let Ok(observation) = serde_json::from_reader(&stream) {
                         let observation: String = observation;
@@ -423,7 +447,6 @@ impl Worm {
 fn daemonize() {
     let this = env::current_exe().expect("Unable to get the current executable");
     println!("This executable is: {:?}", this);
-
 
     unsafe {
         let action = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
@@ -572,7 +595,7 @@ fn main() {
         }
 
         /* Have we retrieved all data items */
-        let mut suicide_counter = 0; 
+        let mut suicide_counter = 0;
         loop {
             if worm.is_finished() {
                 println!("Finished gathering all data items");
