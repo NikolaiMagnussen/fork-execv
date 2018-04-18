@@ -9,14 +9,16 @@ extern crate serde;
 extern crate serde_json;
 
 use nix::unistd::{execv, fork, gethostname, setsid, ForkResult};
+use nix::sys::signal::{sigaction, Signal, SigAction, SigHandler, SaFlags, SigSet};
 
 use std::io::{self, BufRead, BufReader, Read};
 use std::fs::File;
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs, Shutdown};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::vec::Vec;
+use std::thread;
 use std::hash::Hasher;
 use std::time::{Duration, Instant};
 use std::env;
@@ -34,6 +36,7 @@ enum Message {
     SuicideNote(WormSegment),
     NewSegment(WormSegment),
     WantData(String),
+    GatheringCompleted,
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
@@ -96,7 +99,10 @@ impl Worm {
         let hostname = gethostname(&mut buf)
             .expect("Error getting hostname")
             .to_str()
-            .expect("Error using hostname as str");
+            .expect("Error using hostname as str")
+            .split(".")
+            .next()
+            .expect("No . in hostname");
 
         Worm {
             initial_hostname: String::from(hostname),
@@ -112,15 +118,18 @@ impl Worm {
 
     /// Get data from wormgate on current host
     pub fn get_data(&mut self) {
-        let map: HashMap<String, String> = reqwest::get(&format!("http://localhost:{}/observation_data", self.wormgate_port))
-            .expect("Error requesting observation data")
+        let map: HashMap<String, String> = reqwest::get(&format!(
+            "http://localhost:{}/observation_data",
+            self.wormgate_port
+        )).expect("Error requesting observation data")
             .json()
             .expect("Error parsing JSON");
 
         for (k, v) in &map {
             // Strip away port number from data
+            let host = k.split(":").next().expect("No : in the hostname");
             self.observation_data
-                .insert(k[..k.len() - 5].to_string(), v.to_string());
+                .insert(host.to_string(), v.to_string());
         }
     }
 
@@ -132,12 +141,12 @@ impl Worm {
     /// Listen for gossip from other WormSegments
     /// Insert data into the state struct
     pub fn listen_for_gossip(&mut self) {
-        // Set timeout to 60 seconds
+        // Set timeout to 5 seconds
         let timeout = Duration::from_secs(5);
         let now = Instant::now();
         let listener =
-            TcpListener::bind(format!("{}:{}", &self.current_hostname, get_listen_port()))
-                .expect("Error binding to port");
+            TcpListener::bind(format!("{}:{}", &self.current_hostname, get_listen_port(false)))
+                .expect("Error binding to port when listening for gossip");
         listener
             .set_nonblocking(true)
             .expect("Unable to make listener nonblocking");
@@ -147,34 +156,47 @@ impl Worm {
                     // Accept connections and perform actions based on the message type received
                     // Can either receive a message about a new segment or someone wants data from
                     // the specific host
+                    println!("We got a message!");
                     if let Ok(message) = serde_json::from_reader(&stream) {
                         let message: Message = message;
                         match message {
                             Message::NewSegment(segment) => {
+                                println!("Got message regarding a new segment: {:?}", segment);
                                 if !self.current_segments.contains(&segment) {
                                     self.current_segments.push(segment);
                                     self.cur_num_segments += 1;
                                 }
                             }
                             Message::WantData(hostname) => {
+                                stream.shutdown(Shutdown::Read).expect("Read Shutdown failed");
+                                println!("Got message about someone that wanted data: {:?}", hostname);
                                 let _res = serde_json::to_writer(
                                     &stream,
                                     &self.observation_data.get(&hostname),
                                 );
                             }
                             Message::SuicideNote(segment) => {
+                                println!("Got a suicide note from {:?}", segment);
                                 if let Some(index) =
-                                    self.current_segments.iter().position(|s| s == &segment)
+                                    self.current_segments.iter().position(|s| &s.hostname == &segment.hostname)
                                 {
                                     self.current_segments.remove(index);
                                     self.cur_num_segments -= 1;
                                 }
                             }
+                            Message::GatheringCompleted => {
+                                println!("Got message that we are completed!");
+                                self.cur_num_segments = self.max_num_segments;
+                                println!("Setting current number of segments such that we should die");
+                            }
                         }
+                    } else {
+                        println!("Error determining message...");
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     if now.elapsed() > timeout {
+                        println!("Would block and we have timed out!");
                         break;
                     }
                 }
@@ -194,18 +216,22 @@ impl Worm {
 
             let timeout = Duration::from_secs(1);
             let hostname = &host.hostname;
-            if let Ok(addr) =
-                format!("{}:{}", hostname, self.calculate_port(hostname.as_bytes())).parse()
-            {
-                if let Ok(stream) = TcpStream::connect_timeout(&addr, timeout) {
-                    let _res = serde_json::to_writer(
-                        &stream,
-                        &Message::SuicideNote(WormSegment::new(
-                            TreeState::This,
-                            &self.current_hostname,
-                        )),
-                    );
-                }
+            let mut addr = format!("{}:{}", hostname, self.calculate_port(hostname.as_bytes(), false))
+                .as_str()
+                .to_socket_addrs()
+                .expect("Unable to resolve hostname to IP");
+            if let Ok(stream) = TcpStream::connect_timeout(
+                &addr.next().expect("No IP's matching the hostname"),
+                timeout,
+            ) {
+                let _res = serde_json::to_writer(
+                    &stream,
+                    &Message::SuicideNote(WormSegment::new(
+                        TreeState::This,
+                        &self.current_hostname,
+                    )),
+                );
+                println!("Sent suicide note to {:?}", host);
             }
         }
     }
@@ -220,7 +246,10 @@ impl Worm {
         // Read binary file into buffer and post it to wormgate
         let _n = f.read_to_end(&mut buf).expect("Could not read file to end");
         let res = client
-            .post(&format!("http://{}:{}/worm_entrance", host, self.wormgate_port))
+            .post(&format!(
+                "http://{}:{}/worm_entrance",
+                host, self.wormgate_port
+            ))
             .body(buf)
             .send()
             .expect("Error sending message");
@@ -229,19 +258,23 @@ impl Worm {
     }
 
     /// Calculate the port of a specific hostname
-    fn calculate_port(&self, hostname: &[u8]) -> u64 {
+    fn calculate_port(&self, hostname: &[u8], state_transfer: bool) -> u64 {
         let mut hasher = DefaultHasher::default();
 
         hasher.write(hostname);
 
         /* Make sure port is 16 bit and greater or equal than 1024 */
-        (hasher.finish() & 0xffff) | 1024
+        if state_transfer {
+            (hasher.finish() & 0xffff) | 1024
+        } else {
+            ((hasher.finish() & 0xffff) | 1024) ^ 1
+        }
     }
 
     /// Send the Worm state to a listening worm segment
     fn send_data_to_host(&mut self, host: &str) {
         let _client = reqwest::Client::new();
-        let port = self.calculate_port(host.as_bytes());
+        let port = self.calculate_port(host.as_bytes(), true);
 
         // Update Worm state before sending it
         self.cur_num_segments += 1;
@@ -249,14 +282,18 @@ impl Worm {
             .push(WormSegment::new(TreeState::Child, host));
 
         println!("Sending data to: {}:{}", host, port);
-        let stream =
-            TcpStream::connect(&format!("{}:{}", host, port)).expect("Could not bind to socket");
-        let _res = serde_json::to_writer(stream, &self);
+        if let Ok(stream) = TcpStream::connect(&format!("{}:{}", host, port)) {
+            let _res = serde_json::to_writer(stream, &self);
+        } else {
+            println!("Unable to connect - probably already infected");
+        }
     }
 
     /// Send the program and Worm state to the specified host
     pub fn send_to_host(&mut self, host: &str) {
         self.send_prog_to_host(host);
+        let hundred_ms = Duration::from_millis(100);
+        thread::sleep(hundred_ms);
         self.send_data_to_host(host);
     }
 
@@ -265,7 +302,11 @@ impl Worm {
         let mut send_host = None;
         for host in &self.hosts_to_ovserve {
             println!("Checking if {:?} has been infected", host);
-            if !self.observation_data.contains_key(host) {
+            if !self.observation_data.contains_key(host)
+                && !self.current_segments
+                    .iter()
+                    .any(|ref h| &h.hostname == host)
+            {
                 println!("{:?} has not been infected - lets go!", host);
                 send_host = Some(host.clone());
                 break;
@@ -276,18 +317,25 @@ impl Worm {
 
             // Gossip about it to some other host - with a timeout
             for gossip_host in self.current_segments.iter().take(5) {
+                if gossip_host.hostname == self.current_hostname {
+                    continue;
+                }
+                println!("Gossip host: {:?}", gossip_host);
                 let msg = Message::NewSegment(WormSegment::new(TreeState::Child, &host));
                 let timeout = Duration::from_secs(1);
-                let stream = TcpStream::connect_timeout(
-                    &format!(
-                        "{}:{}",
-                        &gossip_host.hostname,
-                        self.calculate_port(gossip_host.hostname.as_bytes())
-                    ).parse()
-                        .expect("Error parsing address"),
+                let mut addr = format!(
+                    "{}:{}",
+                    &gossip_host.hostname,
+                    self.calculate_port(gossip_host.hostname.as_bytes(), false)
+                ).as_str()
+                    .to_socket_addrs()
+                    .expect("Unable to resolve hostname to IP");
+                if let Ok(stream) = TcpStream::connect_timeout(
+                    &addr.next().expect("No IP's matching the hostname"),
                     timeout,
-                ).expect("Unable to connect to host");
-                let _res = serde_json::to_writer(&stream, &msg);
+                ) {
+                    let _res = serde_json::to_writer(&stream, &msg);
+                }
             }
         } else {
             println!("Could not find a free host");
@@ -298,11 +346,32 @@ impl Worm {
     pub fn return_data(&self) {
         let client = reqwest::Client::new();
         let res = client
-            .post(&format!("http://localhost:{}/observation_data", self.wormgate_port))
+            .post(&format!(
+                "http://localhost:{}/observation_data",
+                self.wormgate_port
+            ))
             .json(&self.observation_data)
             .send()
             .expect("Error uploading data");
         println!("Uploaded data to wormgate: {:?}", res);
+
+        for segment in &self.current_segments {
+            if segment.hostname == self.current_hostname {
+                continue;
+            }
+            let msg = Message::GatheringCompleted;
+            let timeout = Duration::from_secs(1);
+            let hostname = &segment.hostname;
+            let mut addr = format!("{}:{}", hostname, self.calculate_port(hostname.as_bytes(), false))
+                .as_str()
+                .to_socket_addrs()
+                .expect("Unable to resolve hostname to IP");
+            if let Ok(stream) = TcpStream::connect_timeout(&addr.next().expect("No IP's matching the hostname"), timeout) {
+                let _res = serde_json::to_writer(&stream, &msg);
+            } else {
+                println!("Unable to reach segment: {:?}", segment);
+            }
+        }
     }
 
     /// Determine if we have all data we should have before returning it
@@ -311,6 +380,43 @@ impl Worm {
             .iter()
             .all(|ref host| self.observation_data.contains_key(host.as_str()))
     }
+
+    /// Query missing data based on known segments
+    pub fn query_missing_data(&mut self) {
+        // Iterate over known segment
+        for segment in &self.current_segments {
+            println!("Want to query segment: {:?}", segment);
+            // If we are missing data from any of them - ask for it
+            if !self.observation_data.contains_key(&segment.hostname) {
+                println!("Querying segment: {:?} for observation", segment);
+                let msg = Message::WantData(segment.hostname.clone());
+                let timeout = Duration::from_secs(1);
+                let hostname = &segment.hostname;
+                let mut addr = format!("{}:{}", hostname, self.calculate_port(hostname.as_bytes(), false))
+                    .as_str()
+                    .to_socket_addrs()
+                    .expect("Unable to resolve hostname to IP");
+                if let Ok(stream) = TcpStream::connect_timeout(
+                    &addr.next().expect("No IP's matching the hostname"),
+                    timeout,
+                ) {
+                    println!("Connected..");
+                    let _res = serde_json::to_writer(&stream, &msg);
+                    stream.shutdown(Shutdown::Write).expect("Write Shutdown failed");
+                    println!("Sent WantData..waiting for observation");
+                    if let Ok(observation) = serde_json::from_reader(&stream) {
+                        let observation: String = observation;
+                        self.observation_data
+                            .insert(segment.hostname.clone(), observation);
+                    } else {
+                        println!("Could not parse stuff into a String");
+                    }
+                } else {
+                    println!("Tried to connect to {:?} but it timed out", segment);
+                }
+            }
+        }
+    }
 }
 
 /// Daemonize current process
@@ -318,6 +424,15 @@ fn daemonize() {
     let this = env::current_exe().expect("Unable to get the current executable");
     println!("This executable is: {:?}", this);
 
+
+    unsafe {
+        let action = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+        if let Err(e) = sigaction(Signal::SIGCHLD, &action) {
+            println!("Unable to ignore SIGCHLD: {:?}", e);
+        } else {
+            println!("Ignored SIGCHLD - getting rid of zombies");
+        }
+    }
     match fork() {
         Ok(ForkResult::Parent { child, .. }) => {
             println!(
@@ -352,20 +467,30 @@ fn is_daemonized() -> bool {
 }
 
 /// Determine which port to bind to on current host
-fn get_listen_port() -> u64 {
+fn get_listen_port(state_transfer: bool) -> u64 {
     let mut buf = vec![0; 50];
-    let hostname = gethostname(&mut buf).expect("Error getting hostname");
-    get_send_port(hostname.to_bytes())
+    let hostname = gethostname(&mut buf)
+        .expect("Error getting hostname")
+        .to_str()
+        .expect("Error using hostname as str")
+        .split(".")
+        .next()
+        .expect("Error using hostname as str");
+    get_send_port(hostname.as_bytes(), state_transfer)
 }
 
 /// Determine port to send data to at specified host name
-fn get_send_port(hostname: &[u8]) -> u64 {
+fn get_send_port(hostname: &[u8], state_transfer: bool) -> u64 {
     let mut hasher = DefaultHasher::default();
 
     hasher.write(hostname);
 
     /* Make sure port is 16 bit and greater or equal than 1024 */
-    (hasher.finish() & 0xffff) | 1024
+    if state_transfer {
+        (hasher.finish() & 0xffff) | 1024
+    } else {
+        ((hasher.finish() & 0xffff) | 1024) ^ 1
+    }
 }
 
 /// Listen for either the initial connection or a worm from parent segment
@@ -375,11 +500,14 @@ fn listen_for_worm() -> Result<Worm, &'static str> {
     let hostname = gethostname(&mut buf)
         .expect("Error getting hostname")
         .to_str()
+        .expect("Error using hostname as str")
+        .split(".")
+        .next()
         .expect("Error using hostname as str");
-    println!("Listening at {}:{}", hostname, get_listen_port());
+    println!("Listening at {}:{}", hostname, get_listen_port(true));
 
-    let listener = TcpListener::bind(format!("{}:{}", hostname, get_listen_port()))
-        .expect("Error binding to port");
+    let listener = TcpListener::bind(format!("{}:{}", hostname, get_listen_port(true)))
+        .expect("Error binding to port when listening for worm");
 
     /* Accept TCP connection */
     if let Ok((stream, addr)) = listener.accept() {
@@ -403,8 +531,14 @@ fn listen_for_worm() -> Result<Worm, &'static str> {
             let file = File::open("hosts").expect("Unable to open hosts file");
             let mut reader = BufReader::new(file);
             let mut worm_port = String::new();
-            let _nread = reader.read_line(&mut worm_port).expect("Unable to read port number");
-            let worm_port = worm_port.parse::<u16>().expect("Unable to parse port number");
+            let _nread = reader
+                .read_line(&mut worm_port)
+                .expect("Unable to read port number");
+            println!("Worm port: {}", &worm_port);
+            let worm_port = worm_port
+                .trim()
+                .parse::<u16>()
+                .expect("Unable to parse port number");
 
             /* Parse hostnames and create worm */
             let mut hostnames: Vec<String> = vec![String::from(hostname)];
@@ -432,43 +566,72 @@ fn main() {
         let mut worm = listen_for_worm().expect("Unable to create worm");
         println!("Worm is: {:?}", worm);
 
-        /* Have we retrieved all data items */
-        if worm.is_finished() {
-            println!("Finished gathering all data items");
-            if worm.current_hostname == worm.initial_hostname {
-                println!("Finally back home - should return data");
-                worm.return_data();
-                println!("Returned data - will die sooner or later");
-            } else {
-                println!("Need to relocate to initial host");
-                let host = worm.initial_hostname.clone();
-                worm.send_to_host(&host);
-            }
-        } else {
-            /* Get data from wormgate */
+        /* Get data from wormgate if we don't have it */
+        if !worm.observation_data.contains_key(&worm.current_hostname) {
             worm.get_data();
-            /* If we should infect another host, do it */
-            while worm.should_infect() {
-                match rand::random::<u8>() % 2 {
+        }
+
+        /* Have we retrieved all data items */
+        let mut suicide_counter = 0; 
+        loop {
+            if worm.is_finished() {
+                println!("Finished gathering all data items");
+                if worm.current_hostname == worm.initial_hostname {
+                    println!("Finally back home - should return data");
+                    worm.return_data();
+                    println!("Returned data - will die now");
+                    return;
+                } else {
+                    println!("Need to relocate to initial host");
+                    let host = worm.initial_hostname.clone();
+                    worm.send_to_host(&host);
+                    return;
+                }
+            } else {
+                if !worm.should_infect() {
+                    suicide_counter += 3;
+                    println!("Suicide counter: {}", suicide_counter);
+                    if suicide_counter >= 5 {
+                        println!("Worm {:?} should infect {:?}", worm, worm.should_infect());
+                        println!("Should not infect - I'll just die and send a message about it");
+                        worm.send_suicide_note();
+                        return;
+                    } else {
+                        println!("Suicide counter too low - listening for gossip - other suicides");
+                        worm.listen_for_gossip();
+                    }
+                } else {
+                    println!("Reset suicide counter - don't want to die anymore");
+                    suicide_counter = 0;
+                }
+
+                /* If we should infect another host, do it */
+                println!("Worm data: {:?}", worm);
+                match rand::random::<u8>() % 3 {
                     0 => {
                         println!("Infecting another random host and gossiping about it");
                         worm.send_to_random_host();
+                        println!("Sent myself to a random host!");
                     }
                     1 => {
                         println!("Listening for gossip from other hosts");
                         worm.listen_for_gossip();
+                        println!("Gossip hour complete..");
+                    }
+                    2 => {
+                        println!("Want to query for data");
+                        worm.query_missing_data();
+                        println!("Queried data");
                     }
                     _ => {
                         println!("A random number modulo 2 should never be anything but 0 or 1");
                     }
                 }
             }
-
-            println!("Should not infect - I'll just die and send a message about it");
-            worm.send_suicide_note();
         }
     // Stealth is great so let's daemonize and stuff
     } else {
         daemonize();
     }
+    println!("Goodbye from me... :)");
 }
